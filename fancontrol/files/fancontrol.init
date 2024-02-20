@@ -1,0 +1,51 @@
+#!/bin/sh /etc/rc.common
+
+START=99
+STOP=01
+USE_PROCD=1
+
+NAME=fancontrol
+PROG=/usr/bin/$NAME
+
+start_service() {
+    config_load "$NAME"
+
+    local enabled
+    config_get enabled settings enabled
+    [ "$enabled" = "1" ] || { _info "Instance \"$NAME\" disabled."; return 1; }
+
+    local thermal_file
+    local fan_file
+    local thresholds
+    local speeds
+
+    config_get thermal_file settings thermal_file
+    config_get fan_file settings fan_file
+    config_get thresholds settings thresholds
+    config_get speeds settings speeds
+
+    procd_open_instance
+    procd_set_param command $PROG
+    [ -n "$thermal_file" ] && procd_append_param command -t "$thermal_file"
+    [ -n "$fan_file" ] && procd_append_param command -f "$fan_file"
+    [ -n "$thresholds" ] && procd_append_param command -e "$thresholds"
+    [ -n "$speeds" ] && procd_append_param command -s "$speeds"
+    procd_set_param respawn
+    procd_close_instance
+}
+
+start() {
+    start_service
+}
+
+stop() {
+    procd_kill_instance
+}
+
+reload() {
+    procd_reload_instance
+}
+
+service_triggers() {
+    procd_add_reload_trigger "fancontrol"
+}

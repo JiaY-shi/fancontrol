@@ -1,0 +1,11 @@
+{
+	"luci-app-fancontrol": {
+		"description": "Fan General Control Script",
+		"read": {
+			"uci": [ "fancontrol" ]
+		},
+		"write": {
+            "uci": [ "fancontrol"]
+		}
+	}
+}

@@ -1,0 +1,20 @@
+msgid "Fan General Control Script"
+msgstr "风扇通用控制脚本"
+
+msgid "Enabled"
+msgstr "是否开启"
+
+msgid "Settings"
+msgstr "设置"
+
+msgid "Thermal File"
+msgstr "温度虚拟文件"
+
+msgid "Fan Speed File"
+msgstr "风扇速度虚拟文件"
+
+msgid "Please enter the temperature gradient values, separated by comma."
+msgstr "请输入温度阶梯值，用逗号分隔"
+
+msgid "Please enter the speed step values, separated by comma."
+msgstr "请输入速度阶梯值，用逗号分隔。"
