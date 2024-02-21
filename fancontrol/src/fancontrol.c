@@ -180,7 +180,7 @@ int main(int argc ,char* argv[ ]) {
             int fan_speed = calculate_speed(temperature ,MAX_TEMP ,start_temp ,max_speed ,start_speed);
             set_fanspeed(fan_speed ,fan_file);
         }
-        if (debug_mode != '0') {
+        if (debug_mode) {
             fprintf(stdout ,"Temperature: %d°C, Fan Speed: %d\n" ,get_temperature(thermal_file) ,get_fanspeed(fan_file));
         }
         sleep(5);
