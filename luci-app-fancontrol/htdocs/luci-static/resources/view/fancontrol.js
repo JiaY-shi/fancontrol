@@ -8,7 +8,7 @@ return view.extend({
 	render: function () {
 		var m, s, o, v;
 
-		m = new form.Map('fancontrol', _('Fan General Control Script'));
+		m = new form.Map('fancontrol', _('Fan General Control'));
 		s = m.section(form.TypedSection, 'fancontrol', _('Settings'));
 		s.anonymous = true;
 
@@ -21,11 +21,14 @@ return view.extend({
 		o = s.option(form.Value, 'fan_file', _('Fan File'), _('Fan Speed File'));
 		o.placeholder = '/sys/devices/virtual/thermal/cooling_device0/cur_state';
 
-		o = s.option(form.Value, 'thresholds', _('Temperature'), _('Please enter the temperature gradient values, separated by comma.'));
-		o.placeholder = '100,90,80,75,60,65,60,50,45';
+		o = s.option(form.Value, 'start_speed', _('Initial Speed'), _('Please enter the initial speed for fan startup.'));
+		o.placeholder = '35';
 
-		o = s.option(form.Value, 'speeds', _('Speed'), _('Please enter the speed step values, separated by comma.'));
-		o.placeholder = '255,220,185,150,115,95,80,60,30';
+		o = s.option(form.Value, 'max_speed', _('Max Speed'), _('Please enter maximum fan speed.'));
+		o.placeholder = '255';
+
+		o = s.option(form.Value, 'start_temp', _('Start Temperature'), _('Please enter the fan start temperature.'));
+		o.placeholder = '45';
 
 		return m.render();
 	}

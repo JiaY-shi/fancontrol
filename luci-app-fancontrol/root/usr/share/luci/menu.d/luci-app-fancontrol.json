@@ -1,6 +1,6 @@
 {
 	"admin/services/fancontrol": {
-		"title": "Fan General Control Script",
+		"title": "Fan General Control",
 		"order": 90,
 		"action": {
 			"type": "view",
