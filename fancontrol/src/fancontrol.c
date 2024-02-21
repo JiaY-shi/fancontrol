@@ -6,26 +6,16 @@
 #include <signal.h> 
 
 #define MAX_LENGTH 200
+#define MAX_TEMP 120
 
 // 定义全局变量
 char thermal_file[MAX_LENGTH] = "/sys/devices/virtual/thermal/thermal_zone0/temp";
 char fan_file[MAX_LENGTH] = "/sys/devices/virtual/thermal/cooling_device0/cur_state";
-char thresholds_str[MAX_LENGTH] = "100,90,80,75,60,65,60,50,45";
-char speeds_str[MAX_LENGTH] = "255,220,185,150,115,95,80,60,30";
-char debug_mode = '0';
 
-/**
- * 逗号分隔的转数组
- */
-void string_to_array(char* str ,int* array ,size_t* len) {
-    char* token = strtok(str ,",");
-    *len = 0;
-    while (token != NULL) {
-        array[*len] = atoi(token);
-        ( *len )++;
-        token = strtok(NULL ,",");
-    }
-}
+int start_temp = 45;
+int start_speed = 35;
+int max_speed = 255;
+int debug_mode = 0;
 
 /**
  * 底层读文件
@@ -102,12 +92,13 @@ int set_fanspeed(int fan_speed ,char* fan_file) {
 /**
  * 计算风扇转速
  */
-int calculate_speed(int temperature ,int* thresholds ,size_t len_t ,int* speeds ,size_t len_s) {
-    int fan_speed = 0;
-    for (int i = 0; i < len_t; i++) {
-        if (temperature > thresholds[i]) {
-            fan_speed = i >= len_s ? speeds[len_s - 1] : speeds[i];
-        } else break;
+int calculate_speed(int current_temp ,int max_temp ,int min_temp ,int max_speed ,int min_speed) {
+    if (current_temp < min_temp) {
+        return 0;
+    }
+    int fan_speed = ( current_temp - min_temp ) * ( max_speed - min_speed ) / ( max_temp - min_temp ) + min_speed;
+    if (fan_speed > max_speed) {
+        fan_speed = max_speed;
     }
     return fan_speed;
 }
@@ -118,13 +109,6 @@ int calculate_speed(int temperature ,int* thresholds ,size_t len_t ,int* speeds 
 static int file_exist(const char* name) {
     struct stat buffer;
     return stat(name ,&buffer);
-}
-
-/**
- * 排序函数
-*/
-int cmp(const void* a ,const void* b) {
-    return *( int* )a - *( int* )b;
 }
 
 /**
@@ -152,12 +136,9 @@ void register_signal_handlers( ) {
  * 主函数
  */
 int main(int argc ,char* argv[ ]) {
-    int thresholds[MAX_LENGTH] ,speeds[MAX_LENGTH];
-    size_t len_t = 0 ,len_s = 0;
-
     // 解析命令行选项
     int opt;
-    while (( opt = getopt(argc ,argv ,"t:f:s:e:d:") ) != -1) {
+    while (( opt = getopt(argc ,argv ,"t:f:s:e:m:d:") ) != -1) {
         switch (opt) {
             case 't':
                 snprintf(thermal_file ,sizeof(thermal_file) ,"%s" ,optarg);
@@ -166,16 +147,19 @@ int main(int argc ,char* argv[ ]) {
                 snprintf(fan_file ,sizeof(fan_file) ,"%s" ,optarg);
                 break;
             case 's':
-                snprintf(speeds_str ,sizeof(speeds_str) ,"%s" ,optarg);
+                start_speed = atoi(optarg);
                 break;
             case 'e':
-                snprintf(thresholds_str ,sizeof(thresholds_str) ,"%s" ,optarg);
+                start_temp = atoi(optarg);
+                break;
+            case 'm':
+                max_speed = atoi(optarg);
                 break;
             case 'd':
-                snprintf(&debug_mode ,sizeof(debug_mode) ,"%s" ,optarg);
+                debug_mode = atoi(optarg);
                 break;
             default:
-                fprintf(stderr ,"Usage: %s [-t thermal_file] [-f fan_file] [-s speeds] [-e thresholds]\n" ,argv[0]);
+                fprintf(stderr ,"Usage: %s [-t thermal file] [-f fan file] [-s start speed] [-e start temp] [-m max speed]\n" ,argv[0]);
                 exit(EXIT_FAILURE);
         }
     }
@@ -185,14 +169,6 @@ int main(int argc ,char* argv[ ]) {
         exit(EXIT_FAILURE);
     }
 
-    // 字符串转数组
-    string_to_array(thresholds_str ,thresholds ,&len_t);
-    string_to_array(speeds_str ,speeds ,&len_s);
-
-    // 从大到小排序
-    qsort(thresholds ,len_t ,sizeof(int) ,cmp);
-    qsort(speeds ,len_s ,sizeof(int) ,cmp);
-
     // 注册退出信号
     register_signal_handlers( );
 
@@ -201,7 +177,7 @@ int main(int argc ,char* argv[ ]) {
         int temperature = get_temperature(thermal_file);
         // 有效温度时设置风扇速度
         if (temperature > 0) {
-            int fan_speed = calculate_speed(temperature ,thresholds ,len_t ,speeds ,len_s);
+            int fan_speed = calculate_speed(temperature ,MAX_TEMP ,start_temp ,max_speed ,start_speed);
             set_fanspeed(fan_speed ,fan_file);
         }
         if (debug_mode != '0') {

@@ -16,20 +16,23 @@ start_service() {
 
     local thermal_file
     local fan_file
-    local thresholds
-    local speeds
+    local start_temp
+    local start_speed
+    local max_speed
 
     config_get thermal_file settings thermal_file
     config_get fan_file settings fan_file
-    config_get thresholds settings thresholds
-    config_get speeds settings speeds
+    config_get start_temp settings start_temp
+    config_get start_speed settings start_speed
+    config_get max_speed settings max_speed
 
     procd_open_instance
     procd_set_param command $PROG
     [ -n "$thermal_file" ] && procd_append_param command -t "$thermal_file"
     [ -n "$fan_file" ] && procd_append_param command -f "$fan_file"
-    [ -n "$thresholds" ] && procd_append_param command -e "$thresholds"
-    [ -n "$speeds" ] && procd_append_param command -s "$speeds"
+    [ -n "$start_temp" ] && procd_append_param command -e "$start_temp"
+    [ -n "$start_speed" ] && procd_append_param command -s "$start_speed"
+    [ -n "$max_speed" ] && procd_append_param command -m "$max_speed"
     procd_set_param respawn
     procd_close_instance
 }
