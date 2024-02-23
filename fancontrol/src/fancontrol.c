@@ -9,13 +9,14 @@
 #define MAX_TEMP 120
 
 // 定义全局变量
-char thermal_file[MAX_LENGTH] = "/sys/devices/virtual/thermal/thermal_zone0/temp";
-char fan_file[MAX_LENGTH] = "/sys/devices/virtual/thermal/cooling_device0/cur_state";
+char thermal_file[MAX_LENGTH] = "/sys/devices/virtual/thermal/thermal_zone0/temp";      // -T
+char fan_file[MAX_LENGTH] = "/sys/devices/virtual/thermal/cooling_device0/cur_state";   // -F
 
-int start_temp = 45;
-int start_speed = 35;
-int max_speed = 255;
-int debug_mode = 0;
+int start_speed = 35;   // -s
+int start_temp = 45;    // -t
+int max_speed = 255;    // -m
+int temp_div = 1000;    // -d
+int debug_mode = 0;     // -D
 
 /**
  * 底层读文件
@@ -61,10 +62,10 @@ static size_t write_file(const char* path ,char* buf ,size_t len) {
 /**
  * 读取温度
  */
-int get_temperature(char* thermal_file) {
+int get_temperature(char* thermal_file ,int div) {
     char buf[8] = { 0 };
     if (read_file(thermal_file ,buf ,0) == 0) {
-        return atoi(buf) / 1000;
+        return atoi(buf) / div;
     }
     return -1;
 }
@@ -138,28 +139,38 @@ void register_signal_handlers( ) {
 int main(int argc ,char* argv[ ]) {
     // 解析命令行选项
     int opt;
-    while (( opt = getopt(argc ,argv ,"t:f:s:e:m:d:") ) != -1) {
+    while (( opt = getopt(argc ,argv ,"T:F:s:t:m:d:D:v:") ) != -1) {
         switch (opt) {
-            case 't':
+            case 'T':
                 snprintf(thermal_file ,sizeof(thermal_file) ,"%s" ,optarg);
                 break;
-            case 'f':
+            case 'F':
                 snprintf(fan_file ,sizeof(fan_file) ,"%s" ,optarg);
                 break;
             case 's':
                 start_speed = atoi(optarg);
                 break;
-            case 'e':
+            case 't':
                 start_temp = atoi(optarg);
                 break;
             case 'm':
                 max_speed = atoi(optarg);
                 break;
             case 'd':
+                temp_div = atoi(optarg);
+                break;
+            case 'D':
                 debug_mode = atoi(optarg);
                 break;
             default:
-                fprintf(stderr ,"Usage: %s [-t thermal file] [-f fan file] [-s start speed] [-e start temp] [-m max speed]\n" ,argv[0]);
+                fprintf(stderr ,"Usage: %s [option]\n"
+                    "          -T sysfs         # temperature sysfs file, default is '%s'\n"
+                    "          -F sysfs         # fan sysfs file, default is '%s'\n"
+                    "          -s speed         # initial speed for fan startup, default is %d\n"
+                    "          -t temperature   # fan start temperature, default is %d°C\n"
+                    "          -m speed         # fan maximum speed, default is %d\n"
+                    "          -d div           # temperature divide, default is %d\n"
+                    "          -v               # verbose\n" ,argv[0] ,thermal_file ,fan_file ,start_speed ,start_temp ,max_speed ,temp_div);
                 exit(EXIT_FAILURE);
         }
     }
@@ -174,14 +185,14 @@ int main(int argc ,char* argv[ ]) {
 
     // 监控风扇
     while (1) {
-        int temperature = get_temperature(thermal_file);
+        int temperature = get_temperature(thermal_file ,temp_div);
         // 有效温度时设置风扇速度
         if (temperature > 0) {
             int fan_speed = calculate_speed(temperature ,MAX_TEMP ,start_temp ,max_speed ,start_speed);
             set_fanspeed(fan_speed ,fan_file);
         }
         if (debug_mode) {
-            fprintf(stdout ,"Temperature: %d°C, Fan Speed: %d\n" ,get_temperature(thermal_file) ,get_fanspeed(fan_file));
+            fprintf(stdout ,"Temperature: %d°C, Fan Speed: %d\n" ,get_temperature(thermal_file ,temp_div) ,get_fanspeed(fan_file));
         }
         sleep(5);
     }
