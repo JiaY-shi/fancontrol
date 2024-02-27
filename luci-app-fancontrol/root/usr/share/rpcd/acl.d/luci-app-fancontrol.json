@@ -2,10 +2,19 @@
 	"luci-app-fancontrol": {
 		"description": "Fan General Control",
 		"read": {
-			"uci": [ "fancontrol" ]
+			"uci": [
+				"fancontrol"
+			],
+			"file": {
+				"/sys/devices/virtual/thermal/*/*": [
+					"read"
+				]
+			}
 		},
 		"write": {
-            "uci": [ "fancontrol"]
+			"uci": [
+				"fancontrol"
+			]
 		}
 	}
 }
