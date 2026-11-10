@@ -406,6 +406,16 @@ return view.extend({
 		o.validate = validateAutoPath;
 		o.description = _('Optional pwmN_enable path used to select manual PWM mode. With "auto", the matching control is used when available.');
 
+		o = s.taboption('hardware', form.Value, 'cooling_device', _('Kernel cooling device'));
+		o.default = 'auto';
+		o.value('auto');
+		o.value('none');
+		o.rmempty = false;
+		o.validate = function(sectionId, value) {
+			return value === 'none' ? true : validateAutoPath(sectionId, value);
+		};
+		o.description = _('Use auto for a single pwm-fan device, an explicit cooling_device path for multiple fans, or none when kernel fan control is already handled elsewhere.');
+
 		o = s.taboption('hardware', form.Value, 'temp_div', _('Temperature divisor'));
 		o.default = '1000';
 		o.value('1');

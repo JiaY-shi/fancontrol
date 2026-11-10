@@ -45,10 +45,31 @@ Fan Control 是一个用户空间温控程序，用于控制通过 Linux hwmon P
    输出。
 3. 如果存在匹配的 `pwmN_enable`，则写入 `1` 以选择手动 PWM 控制模式。
 4. 如果存在匹配的 `fanN_input`，则读取风扇转速反馈。
+5. 将唯一的 `pwmfan` hwmon 设备与唯一的 `pwm-fan` 散热设备配对，按下述方式
+   暂停与用户空间调速冲突的内核风扇控制。
 
 对于带有多个传感器或风扇的系统，可以明确指定每个路径和设备名称。
 `cooling_deviceN/cur_state` 是离散的散热状态索引，不是连续 PWM 输出，因此会被
 拒绝。
+
+## 内核风扇控制
+
+`user_space` 和 `step_wise` 是内核 thermal governor，不是两套 Fan Control
+温控曲线。内核使用 `user_space` 时无需接管；使用 `step_wise` 时，程序会保存
+并临时停用仅绑定到当前风扇的 `active` 触发点，写入内核定义的
+`THERMAL_TEMP_INVALID` 值，避免内核覆盖 PWM 输出。thermal zone 保持启用，
+`hot`、`critical` 和 `passive` 触发点不会被修改。
+
+服务正常退出时，先写入 `exit_speed`，再恢复原来的风扇触发点。修改前会将
+原始阈值保存到 `/var/run/fancontrol.status.thermal`；如果进程被强制终止而
+未执行清理，下次启动时会先恢复这份记录，再重新接管。OpenWrt procd 负责
+监控和重启服务。
+
+`cooling_device` 默认为 `auto`。存在多个 PWM 风扇时，需明确指定与当前风扇
+对应的目录，例如 `/sys/class/thermal/cooling_device0`；sysfs 未提供可用于
+多风扇自动配对的可靠关联。只有已通过其他方式处理内核风扇控制时才使用 `none`。
+对于不支持的 governor、只读触发点，或与其他散热设备共用的触发点，程序会拒绝
+接管，避免影响其他温控功能。
 
 ## 配置
 
@@ -62,6 +83,7 @@ config fancontrol 'settings'
 	option fan_file 'auto'
 	option fan_hwmon 'auto'
 	option enable_file 'auto'
+	option cooling_device 'auto'
 	option start_temp '45'
 	option full_speed_temp '85'
 	option hysteresis '3'

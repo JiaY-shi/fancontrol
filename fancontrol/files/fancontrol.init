@@ -31,6 +31,7 @@ start_service() {
 	append_option fan_file -F
 	append_option fan_hwmon -N
 	append_option enable_file -E
+	append_option cooling_device -C
 	append_option start_temp -t
 	append_option full_speed_temp -x
 	append_option hysteresis -H

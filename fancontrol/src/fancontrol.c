@@ -16,11 +16,12 @@
 #include <unistd.h>
 
 #define PROGRAM_NAME "fancontrol"
-#define PROGRAM_VERSION "2.0.0"
+#define PROGRAM_VERSION "2.2.0"
 #define AUTO_VALUE "auto"
 #define DEFAULT_SYSFS_ROOT "/sys"
 #define DEFAULT_STATUS_FILE "/var/run/fancontrol.status"
 #define MAX_HWMON_CHANNELS 32
+#define THERMAL_TEMP_INVALID (-274000)
 
 struct fan_config {
 	char thermal_file[PATH_MAX];
@@ -28,6 +29,7 @@ struct fan_config {
 	char fan_file[PATH_MAX];
 	char fan_hwmon[128];
 	char enable_file[PATH_MAX];
+	char cooling_device[PATH_MAX];
 	int start_temp;
 	int full_speed_temp;
 	int hysteresis;
@@ -43,11 +45,21 @@ struct fan_config {
 	bool once;
 };
 
+struct kernel_trip {
+	char path[PATH_MAX];
+	int temperature;
+};
+
 struct fan_runtime {
 	char thermal_file[PATH_MAX];
 	char fan_file[PATH_MAX];
 	char enable_file[PATH_MAX];
 	char rpm_file[PATH_MAX];
+	char kernel_state_file[PATH_MAX];
+	struct kernel_trip *kernel_trips;
+	size_t kernel_trip_count;
+	int kernel_lock_fd;
+	bool kernel_state_saved;
 	bool fan_active;
 };
 
@@ -64,6 +76,7 @@ static void usage(FILE *stream, const char *name)
 		"  -F path       PWM sysfs path or 'auto'\n"
 		"  -N name       preferred hwmon name or 'auto'\n"
 		"  -E path       pwm enable sysfs path or 'auto'\n"
+		"  -C path       kernel cooling device, 'auto' or 'none'\n"
 		"  -t degrees    fan start temperature\n"
 		"  -x degrees    full-speed temperature\n"
 		"  -H degrees    stop hysteresis\n"
@@ -169,7 +182,7 @@ static int write_long_file(const char *path, int value)
 	if (length < 0 || (size_t)length >= sizeof(buffer))
 		return -1;
 
-	fd = open(path, O_WRONLY | O_CLOEXEC);
+	fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC);
 	if (fd < 0)
 		return -1;
 
@@ -443,6 +456,7 @@ static int resolve_paths(const struct fan_config *config,
 			 struct fan_runtime *runtime)
 {
 	memset(runtime, 0, sizeof(*runtime));
+	runtime->kernel_lock_fd = -1;
 	copy_string(runtime->enable_file, sizeof(runtime->enable_file),
 		    config->enable_file);
 
@@ -494,6 +508,336 @@ static int resolve_paths(const struct fan_config *config,
 		}
 	}
 
+	return 0;
+}
+
+static int append_kernel_trip(struct fan_runtime *runtime, const char *path,
+			      int temperature)
+{
+	struct kernel_trip *trips;
+	size_t i;
+
+	for (i = 0; i < runtime->kernel_trip_count; i++)
+		if (strcmp(runtime->kernel_trips[i].path, path) == 0)
+			return 0;
+
+	trips = realloc(runtime->kernel_trips,
+			(runtime->kernel_trip_count + 1) * sizeof(*trips));
+	if (!trips)
+		return -1;
+	runtime->kernel_trips = trips;
+	if (copy_string(trips[runtime->kernel_trip_count].path, PATH_MAX, path))
+		return -1;
+	trips[runtime->kernel_trip_count++].temperature = temperature;
+	return 0;
+}
+
+static int restore_kernel_trips(struct fan_runtime *runtime)
+{
+	bool failed = false;
+	size_t i;
+
+	if (!runtime->kernel_state_saved)
+		return 0;
+
+	for (i = 0; i < runtime->kernel_trip_count; i++) {
+		const struct kernel_trip *trip = &runtime->kernel_trips[i];
+		long current;
+
+		if (read_long_file(trip->path, &current)) {
+			if (errno == ENOENT)
+				continue;
+		} else if (current != THERMAL_TEMP_INVALID) {
+			/* Preserve changes made by another administrator. */
+			continue;
+		} else if (!write_long_file(trip->path, trip->temperature)) {
+			continue;
+		}
+		syslog(LOG_ERR, "failed to restore kernel fan trip %s: %s",
+		       trip->path, strerror(errno));
+		failed = true;
+	}
+	if (failed || (unlink(runtime->kernel_state_file) && errno != ENOENT))
+		return -1;
+
+	free(runtime->kernel_trips);
+	runtime->kernel_trips = NULL;
+	runtime->kernel_trip_count = 0;
+	runtime->kernel_state_saved = false;
+	return 0;
+}
+
+static int load_kernel_state(struct fan_runtime *runtime)
+{
+	char line[PATH_MAX + 64];
+	FILE *stream;
+	int result = 0;
+
+	stream = fopen(runtime->kernel_state_file, "r");
+	if (!stream)
+		return errno == ENOENT ? 0 : -1;
+
+	while (fgets(line, sizeof(line), stream)) {
+		int temperature, offset = 0, zone, trip, length = 0;
+		const char *path;
+		size_t root_length = strlen(sysfs_root);
+
+		line[strcspn(line, "\r\n")] = '\0';
+		if (sscanf(line, "%d %n", &temperature, &offset) != 1 ||
+		    temperature <= THERMAL_TEMP_INVALID)
+			goto invalid;
+		path = line + offset;
+		if (strncmp(path, sysfs_root, root_length) ||
+		    sscanf(path + root_length,
+			   "/class/thermal/thermal_zone%d/trip_point_%d_temp%n",
+			   &zone, &trip, &length) != 2 ||
+		    zone < 0 || trip < 0 || path[root_length + length] ||
+		    append_kernel_trip(runtime, path, temperature))
+			goto invalid;
+		continue;
+invalid:
+		syslog(LOG_ERR, "invalid kernel fan state in %s",
+		       runtime->kernel_state_file);
+		result = -1;
+		break;
+	}
+	if (ferror(stream))
+		result = -1;
+	fclose(stream);
+	if (!result)
+		runtime->kernel_state_saved = true;
+	return result;
+}
+
+static int save_kernel_state(struct fan_runtime *runtime)
+{
+	char temporary[PATH_MAX];
+	FILE *stream;
+	bool failed = false;
+	size_t i;
+	int fd;
+
+	if (snprintf(temporary, sizeof(temporary), "%s.%ld",
+		     runtime->kernel_state_file, (long)getpid()) >= (int)sizeof(temporary))
+		return -1;
+	fd = open(temporary, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+	if (fd < 0)
+		return -1;
+	stream = fdopen(fd, "w");
+	if (!stream) {
+		close(fd);
+		unlink(temporary);
+		return -1;
+	}
+	for (i = 0; i < runtime->kernel_trip_count; i++)
+		if (fprintf(stream, "%d %s\n", runtime->kernel_trips[i].temperature,
+			    runtime->kernel_trips[i].path) < 0)
+			failed = true;
+	if (fflush(stream) || fsync(fd))
+		failed = true;
+	if (fclose(stream))
+		failed = true;
+	if (failed || rename(temporary, runtime->kernel_state_file)) {
+		unlink(temporary);
+		return -1;
+	}
+	runtime->kernel_state_saved = true;
+	return 0;
+}
+
+/* Cooling devices have no hwmon/OF link in sysfs. Only infer a unique pair. */
+static int find_kernel_cooling_device(const struct fan_config *config,
+				      const struct fan_runtime *runtime,
+				      char *result, size_t size)
+{
+	char pattern[PATH_MAX], path[PATH_MAX], name[128];
+	glob_t paths = { 0 };
+	char *slash;
+	int fan_count = 0, cooling_count = 0;
+	size_t i;
+
+	if (strcmp(config->cooling_device, "none") == 0)
+		return 0;
+	if (!is_auto(config->cooling_device))
+		return copy_string(result, size, config->cooling_device) ? -1 : 1;
+
+	if (copy_string(path, sizeof(path), runtime->fan_file))
+		return -1;
+	slash = strrchr(path, '/');
+	if (!slash || copy_string(slash + 1, sizeof(path) - (size_t)(slash + 1 - path),
+				 "name") || read_text_file(path, name, sizeof(name)) ||
+	    strcmp(name, "pwmfan"))
+		return 0;
+
+	if (snprintf(pattern, sizeof(pattern), "%s/class/hwmon/hwmon*/name",
+		     sysfs_root) >= (int)sizeof(pattern))
+		return -1;
+	if (glob(pattern, 0, NULL, &paths) == 0) {
+		for (i = 0; i < paths.gl_pathc; i++)
+			if (!read_text_file(paths.gl_pathv[i], name, sizeof(name)) &&
+			    strcmp(name, "pwmfan") == 0)
+				fan_count++;
+	}
+	globfree(&paths);
+	memset(&paths, 0, sizeof(paths));
+	if (snprintf(pattern, sizeof(pattern), "%s/class/thermal/cooling_device*/type",
+		     sysfs_root) >= (int)sizeof(pattern))
+		return -1;
+	if (glob(pattern, 0, NULL, &paths) == 0) {
+		for (i = 0; i < paths.gl_pathc; i++) {
+			if (read_text_file(paths.gl_pathv[i], name, sizeof(name)) ||
+			    strcmp(name, "pwm-fan"))
+				continue;
+			if (copy_string(result, size, paths.gl_pathv[i])) {
+				globfree(&paths);
+				return -1;
+			}
+			*strrchr(result, '/') = '\0';
+			cooling_count++;
+		}
+	}
+	globfree(&paths);
+	if (!cooling_count)
+		return 0;
+	if (fan_count != 1 || cooling_count != 1) {
+		syslog(LOG_ERR, "multiple PWM fans or cooling devices; select cooling_device explicitly");
+		return -1;
+	}
+	return 1;
+}
+
+static bool is_cooling_binding(const char *path)
+{
+	const char *name = strrchr(path, '/');
+	int index;
+	char trailing;
+
+	return name && sscanf(name + 1, "cdev%d%c", &index, &trailing) == 1 && index >= 0;
+}
+
+static int collect_kernel_trips(const char *cooling_device, struct fan_runtime *runtime)
+{
+	char pattern[PATH_MAX], path[PATH_MAX], zone[PATH_MAX], type[128];
+	struct stat selected, bound;
+	glob_t bindings = { 0 };
+	int result = -1;
+	size_t i, j;
+
+	if (stat(cooling_device, &selected))
+		return -1;
+	if (snprintf(pattern, sizeof(pattern), "%s/class/thermal/thermal_zone*/cdev*",
+		     sysfs_root) >= (int)sizeof(pattern))
+		return -1;
+	if (glob(pattern, 0, NULL, &bindings))
+		return 0;
+
+	for (i = 0; i < bindings.gl_pathc; i++) {
+		const char *binding = bindings.gl_pathv[i];
+		long trip, temperature;
+
+		if (!is_cooling_binding(binding) || stat(binding, &bound) ||
+		    selected.st_dev != bound.st_dev || selected.st_ino != bound.st_ino)
+			continue;
+		if (snprintf(path, sizeof(path), "%s_trip_point", binding) >= (int)sizeof(path) ||
+		    read_long_file(path, &trip) || trip < 0 || trip > INT_MAX ||
+		    copy_string(zone, sizeof(zone), binding))
+			goto out;
+		*strrchr(zone, '/') = '\0';
+		if (snprintf(path, sizeof(path), "%s/policy", zone) >= (int)sizeof(path) ||
+		    read_text_file(path, type, sizeof(type)))
+			goto out;
+		if (strcmp(type, "user_space") == 0)
+			continue;
+		if (strcmp(type, "step_wise")) {
+			syslog(LOG_ERR, "cannot take over fan from kernel governor %s in %s", type, zone);
+			goto out;
+		}
+		if (snprintf(path, sizeof(path), "%s/trip_point_%ld_type", zone, trip) >=
+		    (int)sizeof(path) || read_text_file(path, type, sizeof(type)))
+			goto out;
+		if (strcmp(type, "active")) {
+			syslog(LOG_ERR, "refusing to disable %s fan trip in %s", type, zone);
+			goto out;
+		}
+		/* A trip may also control CPU frequency or another fan. Leave it alone. */
+		for (j = 0; j < bindings.gl_pathc; j++) {
+			const char *other = bindings.gl_pathv[j];
+			long other_trip;
+
+			if (!is_cooling_binding(other) || strncmp(other, zone, strlen(zone)) ||
+			    other[strlen(zone)] != '/' || stat(other, &bound) ||
+			    (selected.st_dev == bound.st_dev && selected.st_ino == bound.st_ino))
+				continue;
+			if (snprintf(path, sizeof(path), "%s_trip_point", other) >= (int)sizeof(path) ||
+			    read_long_file(path, &other_trip))
+				goto out;
+			if (other_trip == trip) {
+				syslog(LOG_ERR, "fan trip %ld in %s is shared with another cooling device", trip, zone);
+				goto out;
+			}
+		}
+		if (snprintf(path, sizeof(path), "%s/trip_point_%ld_temp", zone, trip) >=
+		    (int)sizeof(path) || read_long_file(path, &temperature))
+			goto out;
+		if (temperature == THERMAL_TEMP_INVALID)
+			continue;
+		if (temperature <= THERMAL_TEMP_INVALID || temperature > INT_MAX ||
+		    access(path, W_OK) || append_kernel_trip(runtime, path, (int)temperature))
+			goto out;
+	}
+	result = 0;
+out:
+	globfree(&bindings);
+	return result;
+}
+
+static int claim_kernel_fan_control(const struct fan_config *config,
+				   struct fan_runtime *runtime)
+{
+	char path[PATH_MAX];
+	struct flock lock = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
+	int found;
+	size_t i;
+
+	if (snprintf(runtime->kernel_state_file, sizeof(runtime->kernel_state_file),
+		     "%s.thermal", status_file) >= (int)sizeof(runtime->kernel_state_file) ||
+	    snprintf(path, sizeof(path), "%s.lock", status_file) >= (int)sizeof(path))
+		return -1;
+	runtime->kernel_lock_fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	if (runtime->kernel_lock_fd < 0 || fcntl(runtime->kernel_lock_fd, F_SETLK, &lock)) {
+		syslog(LOG_ERR, "cannot lock controller state %s: %s", path, strerror(errno));
+		return -1;
+	}
+	/* Recover the original thresholds if an earlier process was killed. */
+	if (load_kernel_state(runtime) || restore_kernel_trips(runtime))
+		return -1;
+	found = find_kernel_cooling_device(config, runtime, path, sizeof(path));
+	if (found <= 0)
+		return found;
+	if (collect_kernel_trips(path, runtime))
+		return -1;
+	if (!runtime->kernel_trip_count)
+		return 0;
+	/* Persist every original value before changing any sysfs attributes. */
+	if (save_kernel_state(runtime))
+		return -1;
+	for (i = 0; i < runtime->kernel_trip_count; i++) {
+		long temperature;
+
+		if (write_long_file(runtime->kernel_trips[i].path, THERMAL_TEMP_INVALID)) {
+			syslog(LOG_ERR, "failed to pause kernel fan trip %s: %s",
+			       runtime->kernel_trips[i].path, strerror(errno));
+			return -1;
+		}
+		if (read_long_file(runtime->kernel_trips[i].path, &temperature) ||
+		    temperature != THERMAL_TEMP_INVALID) {
+			syslog(LOG_ERR, "kernel did not pause fan trip %s",
+			       runtime->kernel_trips[i].path);
+			return -1;
+		}
+	}
+	syslog(LOG_NOTICE, "paused %zu kernel fan trips; hot, critical and passive trips remain active",
+	       runtime->kernel_trip_count);
 	return 0;
 }
 
@@ -572,7 +916,8 @@ static int install_signal_handlers(void)
 
 	sigemptyset(&action.sa_mask);
 	return sigaction(SIGINT, &action, NULL) ||
-	       sigaction(SIGTERM, &action, NULL);
+	       sigaction(SIGTERM, &action, NULL) ||
+	       sigaction(SIGHUP, &action, NULL);
 }
 
 static void set_defaults(struct fan_config *config)
@@ -583,6 +928,7 @@ static void set_defaults(struct fan_config *config)
 	copy_string(config->fan_file, sizeof(config->fan_file), AUTO_VALUE);
 	copy_string(config->fan_hwmon, sizeof(config->fan_hwmon), AUTO_VALUE);
 	copy_string(config->enable_file, sizeof(config->enable_file), AUTO_VALUE);
+	copy_string(config->cooling_device, sizeof(config->cooling_device), AUTO_VALUE);
 	config->start_temp = 45;
 	config->full_speed_temp = 85;
 	config->hysteresis = 3;
@@ -600,7 +946,7 @@ static void parse_options(int argc, char **argv, struct fan_config *config)
 {
 	int option;
 
-	while ((option = getopt(argc, argv, "T:Z:F:N:E:t:x:H:s:m:k:K:f:q:d:i:D1vh")) != -1) {
+	while ((option = getopt(argc, argv, "T:Z:F:N:E:C:t:x:H:s:m:k:K:f:q:d:i:D1vh")) != -1) {
 		switch (option) {
 		case 'T':
 			if (copy_string(config->thermal_file,
@@ -621,6 +967,10 @@ static void parse_options(int argc, char **argv, struct fan_config *config)
 			break;
 		case 'E':
 			if (copy_string(config->enable_file, sizeof(config->enable_file), optarg))
+				exit(EXIT_FAILURE);
+			break;
+		case 'C':
+			if (copy_string(config->cooling_device, sizeof(config->cooling_device), optarg))
 				exit(EXIT_FAILURE);
 			break;
 		case 't':
@@ -700,6 +1050,7 @@ int main(int argc, char **argv)
 	struct fan_runtime runtime;
 	const char *environment;
 	bool sensor_failed = false;
+	bool control_ready = false;
 	int exit_code = EXIT_SUCCESS;
 
 	set_defaults(&config);
@@ -723,9 +1074,20 @@ int main(int argc, char **argv)
 	if (resolve_paths(&config, &runtime))
 		return EXIT_FAILURE;
 
-	if (runtime.enable_file[0] && write_long_file(runtime.enable_file, 1))
+	if (claim_kernel_fan_control(&config, &runtime)) {
+		syslog(LOG_ERR, "cannot safely take control of the fan from the kernel");
+		if (runtime.kernel_state_saved)
+			set_pwm(&runtime, config.fail_safe_pwm);
+		exit_code = EXIT_FAILURE;
+		goto cleanup;
+	}
+	control_ready = true;
+	if (runtime.enable_file[0] && write_long_file(runtime.enable_file, 1)) {
 		syslog(LOG_WARNING, "failed to select manual PWM mode through %s: %s",
 		       runtime.enable_file, strerror(errno));
+		exit_code = EXIT_FAILURE;
+		goto cleanup;
+	}
 
 	syslog(LOG_NOTICE, "using temperature input %s and PWM output %s",
 	       runtime.thermal_file, runtime.fan_file);
@@ -739,8 +1101,10 @@ int main(int argc, char **argv)
 
 		if (read_long_file(runtime.thermal_file, &raw_temp)) {
 			target_pwm = config.fail_safe_pwm;
-			if (set_pwm(&runtime, target_pwm))
+			if (set_pwm(&runtime, target_pwm)) {
 				exit_code = EXIT_FAILURE;
+				break;
+			}
 			runtime.fan_active = target_pwm > 0;
 			write_status(&runtime, temp_mc, target_pwm, rpm,
 				     "temperature-read-failed");
@@ -759,14 +1123,19 @@ int main(int argc, char **argv)
 
 			if (target_pwm > 0 && !runtime.fan_active &&
 			    config.kick_pwm > 0 && config.kick_ms > 0) {
-				if (!set_pwm(&runtime, config.kick_pwm))
-					sleep_ms((unsigned int)config.kick_ms);
+				if (set_pwm(&runtime, config.kick_pwm)) {
+					exit_code = EXIT_FAILURE;
+					break;
+				}
+				sleep_ms((unsigned int)config.kick_ms);
 			}
 
 			if (!stop_requested &&
 			    (read_long_file(runtime.fan_file, &actual_pwm) ||
-			     actual_pwm != target_pwm) && set_pwm(&runtime, target_pwm))
+			     actual_pwm != target_pwm) && set_pwm(&runtime, target_pwm)) {
 				exit_code = EXIT_FAILURE;
+				break;
+			}
 
 			runtime.fan_active = target_pwm > 0;
 			if (runtime.rpm_file[0])
@@ -783,9 +1152,16 @@ int main(int argc, char **argv)
 		sleep_ms((unsigned int)config.interval * 1000);
 	}
 
-	if (!config.once && set_pwm(&runtime, config.exit_pwm))
+cleanup:
+	if (control_ready && !config.once && set_pwm(&runtime, config.exit_pwm))
 		exit_code = EXIT_FAILURE;
-	unlink(status_file);
+	if (restore_kernel_trips(&runtime))
+		exit_code = EXIT_FAILURE;
+	free(runtime.kernel_trips);
+	if (runtime.kernel_lock_fd >= 0)
+		close(runtime.kernel_lock_fd);
+	if (control_ready)
+		unlink(status_file);
 	closelog();
 	return exit_code;
 }

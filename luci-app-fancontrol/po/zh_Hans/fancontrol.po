@@ -1,6 +1,6 @@
 msgid ""
 msgstr ""
-"Project-Id-Version: luci-app-fancontrol 2.0.0\n"
+"Project-Id-Version: luci-app-fancontrol 2.2.0\n"
 "PO-Revision-Date: 2026-07-30 00:00+0800\n"
 "Last-Translator: JiaY-shi <shi05275@163.com>\n"
 "Language-Team: Chinese (Simplified Han script)\n"
@@ -9,6 +9,12 @@ msgstr ""
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "Kernel cooling device"
+msgstr "内核散热设备"
+
+msgid "Use auto for a single pwm-fan device, an explicit cooling_device path for multiple fans, or none when kernel fan control is already handled elsewhere."
+msgstr "单个 pwm-fan 设备使用 auto；多个风扇需指定对应的 cooling_device 路径；已通过其他方式处理内核风扇控制时使用 none。"
 
 #: /home/shi/document/c-service/fancontrol/luci-app-fancontrol/htdocs/luci-static/resources/view/fancontrol.js:173
 msgid ""

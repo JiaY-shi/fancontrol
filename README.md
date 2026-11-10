@@ -50,10 +50,34 @@ With the default `auto` settings, the daemon:
 3. Writes `1` to the matching `pwmN_enable` node when available to select manual
    control.
 4. Reads the matching `fanN_input` tachometer when available.
+5. Pairs a single `pwmfan` hwmon device with a single `pwm-fan` cooling device
+   and pauses conflicting kernel fan control as described below.
 
 Every path and device name can be selected explicitly for systems with multiple
 sensors or fans. A `cooling_deviceN/cur_state` path is rejected because it is a
 discrete cooling-state index rather than a continuous PWM output.
+
+## Kernel fan control
+
+`user_space` and `step_wise` are kernel thermal governors, not different Fan
+Control curves. With `user_space`, no takeover is needed. With `step_wise`,
+the daemon saves and temporarily invalidates only the active trips bound
+exclusively to the selected fan, using the kernel's `THERMAL_TEMP_INVALID`
+value. This prevents the kernel from overwriting the PWM curve. Thermal zones
+stay enabled, and hot, critical and passive trips are not changed.
+
+On a normal stop, the daemon writes `exit_speed` and restores the original fan
+trips. Original thresholds are journaled in `/var/run/fancontrol.status.thermal`
+before any changes. If the process is killed without cleanup, the next start
+recovers that journal before taking control again. OpenWrt procd supervises and
+restarts the daemon.
+
+`cooling_device` defaults to `auto`. For multiple PWM fans, explicitly select
+the matching directory, such as `/sys/class/thermal/cooling_device0`; sysfs
+does not expose a reliable automatic association between multiple fans and
+cooling devices. Use `none` only when kernel fan control is already handled
+elsewhere. Unsupported governors, read-only trips, and trips shared with other
+cooling devices are rejected instead of disabling other thermal controls.
 
 ## Configuration
 
@@ -67,6 +91,7 @@ config fancontrol 'settings'
 	option fan_file 'auto'
 	option fan_hwmon 'auto'
 	option enable_file 'auto'
+	option cooling_device 'auto'
 	option start_temp '45'
 	option full_speed_temp '85'
 	option hysteresis '3'

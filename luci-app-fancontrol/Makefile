@@ -14,8 +14,8 @@ PKG_LICENSE:=Apache-2.0
 PKG_MAINTAINER:=JiaY-shi <shi05275@163.com>
 
 PKG_NAME:=luci-app-fancontrol
-PKG_VERSION:=2.0.0
-PKG_RELEASE:=5
+PKG_VERSION:=2.2.0
+PKG_RELEASE:=1
 
 include $(TOPDIR)/feeds/luci/luci.mk
 # call BuildPackage - OpenWrt buildroot signature
